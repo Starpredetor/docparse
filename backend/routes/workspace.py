@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from backend.services.retrieval import RetrievalService
 from backend.services.workspace import WorkspaceStore
+from backend.services.knowledge_graph import KnowledgeGraphService
 
 
 class ProjectCreateRequest(BaseModel):
@@ -19,20 +20,31 @@ class NotebookUpdateRequest(BaseModel):
     content: str = Field(default="")
 
 
-def get_router(workspace_store: WorkspaceStore, retrieval_service: RetrievalService) -> APIRouter:
+def get_router(
+    workspace_store: WorkspaceStore,
+    retrieval_service: RetrievalService,
+    knowledge_graph_service: KnowledgeGraphService,
+) -> APIRouter:
     router = APIRouter(prefix="/workspace", tags=["workspace"])
+
+    @router.get("/projects/{project_id}/graph")
+    async def get_project_graph(project_id: str) -> dict:
+        if workspace_store.get_project(project_id=project_id) is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        graph = knowledge_graph_service.get_graph(project_id=project_id)
+        return graph
 
     @router.get("/dashboard")
     async def dashboard() -> dict:
         return {
-            "metrics": workspace_store.metrics(index_size=retrieval_service.index.ntotal),
+            "metrics": workspace_store.metrics(index_size=retrieval_service.get_total_chunks()),
             "projects": workspace_store.list_projects(),
             "recent_chats": workspace_store.recent_chats(limit=10),
         }
 
     @router.get("/metrics")
     async def metrics() -> dict:
-        return workspace_store.metrics(index_size=retrieval_service.index.ntotal)
+        return workspace_store.metrics(index_size=retrieval_service.get_total_chunks())
 
     @router.get("/projects")
     async def list_projects() -> dict:
@@ -42,6 +54,15 @@ def get_router(workspace_store: WorkspaceStore, retrieval_service: RetrievalServ
     async def create_project(payload: ProjectCreateRequest) -> dict:
         project = workspace_store.create_project(name=payload.name)
         return {"item": project}
+
+    @router.delete("/projects/{project_id}")
+    async def delete_project(project_id: str) -> dict:
+        if project_id == "default":
+            raise HTTPException(status_code=400, detail="Cannot delete the default notebook")
+        deleted = workspace_store.delete_project(project_id=project_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Notebook not found")
+        return {"deleted": True}
 
     @router.get("/projects/{project_id}")
     async def get_project(project_id: str) -> dict:

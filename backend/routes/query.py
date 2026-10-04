@@ -14,6 +14,7 @@ from backend.services.embedding import EmbeddingService
 from backend.services.llm import LLMService
 from backend.services.retrieval import RetrievalService
 from backend.services.workspace import WorkspaceStore
+from backend.services.knowledge_graph import KnowledgeGraphService
 
 logger = logging.getLogger("offline_rag.query")
 
@@ -42,6 +43,7 @@ def get_router(
     retrieval_service: RetrievalService,
     llm_service: LLMService,
     workspace_store: WorkspaceStore,
+    knowledge_graph_service: KnowledgeGraphService,
 ) -> APIRouter:
     router = APIRouter(prefix="/query", tags=["query"])
     jobs: Dict[str, _JobState] = {}
@@ -55,7 +57,7 @@ def get_router(
             (request.query or "").strip().lower(),
             request.project_id,
             request.top_k,
-            int(retrieval_service.index.ntotal),
+            retrieval_service.get_index_size(request.project_id),
             round(request.temperature, 3),
             round(request.top_p, 3),
             request.generation_top_k,
@@ -160,15 +162,26 @@ def get_router(
                 logger.info(
                     "query sync cache hit | top_k=%s | index_size=%s | elapsed_sec=%.3f",
                     request.top_k,
-                    retrieval_service.index.ntotal,
+                    retrieval_service.get_index_size(request.project_id),
                     elapsed,
                 )
                 return QueryResponse(answer=cached.answer, sources=cached.sources)
 
             query_vector = embedding_service.embed_query(request.query)
-            hits = retrieval_service.search(query_vector=query_vector, top_k=request.top_k)
+            hits = retrieval_service.search(project_id=request.project_id, query_vector=query_vector, top_k=request.top_k)
 
             contexts = [item["text"] for item in hits]
+
+            # Inject Knowledge Graph subgraph context
+            try:
+                kg_context = knowledge_graph_service.get_subgraph_context(
+                    project_id=request.project_id,
+                    query=request.query
+                )
+                if kg_context:
+                    contexts.insert(0, kg_context)
+            except Exception as kg_exc:
+                logger.error("Failed to retrieve subgraph context: %s", kg_exc)
             answer = llm_service.generate_answer(
                 query=request.query,
                 contexts=contexts,
@@ -244,8 +257,19 @@ def get_router(
                 return QueryStartResponse(job_id=job_id, status="started")
 
             query_vector = embedding_service.embed_query(request.query)
-            hits = retrieval_service.search(query_vector=query_vector, top_k=request.top_k)
+            hits = retrieval_service.search(project_id=request.project_id, query_vector=query_vector, top_k=request.top_k)
             contexts = [item["text"] for item in hits]
+
+            # Inject Knowledge Graph subgraph context for streaming
+            try:
+                kg_context = knowledge_graph_service.get_subgraph_context(
+                    project_id=request.project_id,
+                    query=request.query
+                )
+                if kg_context:
+                    contexts.insert(0, kg_context)
+            except Exception as kg_exc:
+                logger.error("Failed to retrieve subgraph context in stream: %s", kg_exc)
 
             sources = [
                 SourceChunk(

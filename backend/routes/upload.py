@@ -4,14 +4,18 @@ import json
 from pathlib import Path
 from typing import List
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, BackgroundTasks
 
+import logging
 from backend.config import CHUNKS_DIR, METADATA_DIR
 from backend.models.schemas import UploadBatchResponse, UploadItemResult
 from backend.services.embedding import EmbeddingService
 from backend.services.ingestion import IngestionService
 from backend.services.retrieval import RetrievalService
 from backend.services.workspace import WorkspaceStore
+from backend.services.knowledge_graph import KnowledgeGraphService
+
+logger = logging.getLogger("offline_rag.upload")
 
 
 def get_router(
@@ -20,19 +24,23 @@ def get_router(
     retrieval_service: RetrievalService,
     raw_docs_dir: Path,
     workspace_store: WorkspaceStore,
+    knowledge_graph_service: KnowledgeGraphService,
 ) -> APIRouter:
     router = APIRouter(prefix="/upload", tags=["upload"])
 
     def _safe_stem(name: str) -> str:
         return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name)
 
-    def _persist_processed_artifacts(filename: str, chunks: list[str], metadata: list[dict]) -> None:
-        CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
-        METADATA_DIR.mkdir(parents=True, exist_ok=True)
+    def _persist_processed_artifacts(project_id: str, filename: str, chunks: list[str], metadata: list[dict]) -> None:
+        safe_project_id = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in project_id)
+        project_chunks_dir = CHUNKS_DIR / safe_project_id
+        project_meta_dir = METADATA_DIR / safe_project_id
+        project_chunks_dir.mkdir(parents=True, exist_ok=True)
+        project_meta_dir.mkdir(parents=True, exist_ok=True)
 
         stem = _safe_stem(Path(filename).stem)
-        chunk_file = CHUNKS_DIR / f"{stem}.jsonl"
-        meta_file = METADATA_DIR / f"{stem}.json"
+        chunk_file = project_chunks_dir / f"{stem}.jsonl"
+        meta_file = project_meta_dir / f"{stem}.json"
 
         with chunk_file.open("w", encoding="utf-8") as handle:
             for idx, text in enumerate(chunks):
@@ -47,10 +55,13 @@ def get_router(
 
     @router.post("", response_model=UploadBatchResponse)
     async def upload_document(
+        background_tasks: BackgroundTasks,
         files: List[UploadFile] = File(...),
         project_id: str = Form(default="default"),
     ) -> UploadBatchResponse:
-        raw_docs_dir.mkdir(parents=True, exist_ok=True)
+        safe_project_id = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in project_id)
+        project_raw_dir = raw_docs_dir / safe_project_id
+        project_raw_dir.mkdir(parents=True, exist_ok=True)
 
         if not files:
             raise HTTPException(status_code=400, detail="No files were provided")
@@ -60,7 +71,7 @@ def get_router(
 
         try:
             for file in files:
-                target_path = raw_docs_dir / file.filename
+                target_path = project_raw_dir / file.filename
 
                 try:
                     data = await file.read()
@@ -77,10 +88,22 @@ def get_router(
                         )
                         continue
 
-                    _persist_processed_artifacts(file.filename, chunks, metadata)
+                    _persist_processed_artifacts(project_id, file.filename, chunks, metadata)
 
                     vectors = embedding_service.embed_documents(chunks)
-                    retrieval_service.add_chunks(vectors=vectors, chunk_metadata=metadata)
+                    retrieval_service.add_chunks(project_id=project_id, vectors=vectors, chunk_metadata=metadata)
+
+                    # Extract entity-relationship triples for the knowledge graph in the background
+                    try:
+                        full_text = "\n".join(chunks)
+                        background_tasks.add_task(
+                            knowledge_graph_service.extract_and_merge_graph,
+                            project_id,
+                            full_text
+                        )
+                        logger.info("Knowledge Graph: Scheduled background relation extraction for %s.", file.filename)
+                    except Exception as kg_exc:
+                        logger.exception("Failed to schedule knowledge graph background task for file %s: %s", file.filename, kg_exc)
 
                     succeeded += 1
                     workspace_store.add_document(

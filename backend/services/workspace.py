@@ -97,7 +97,18 @@ class WorkspaceStore:
 
     def list_projects(self) -> List[Dict[str, Any]]:
         with self.lock:
-            return list(self._state["projects"])
+            enriched = []
+            for p in self._state["projects"]:
+                project_id = p["id"]
+                docs = self._state["project_docs"].get(project_id, [])
+                doc_count = len(docs)
+                chunk_count = sum(doc.get("chunks_added", 0) for doc in docs)
+                enriched.append({
+                    **p,
+                    "document_count": doc_count,
+                    "chunk_count": chunk_count,
+                })
+            return enriched
 
     def get_project(self, project_id: str) -> Dict[str, Any] | None:
         with self.lock:
@@ -140,16 +151,55 @@ class WorkspaceStore:
             return list(docs)
 
     def delete_document(self, project_id: str, document_id: str) -> bool:
+        filename_to_delete = None
         with self.lock:
             docs = self._state["project_docs"].get(project_id, [])
             original_len = len(docs)
+            for item in docs:
+                if item.get("id") == document_id:
+                    filename_to_delete = item.get("filename")
+                    break
+
             docs = [item for item in docs if item.get("id") != document_id]
             if len(docs) == original_len:
                 return False
 
             self._state["project_docs"][project_id] = docs
             self._write(self._state)
-            return True
+
+        if filename_to_delete:
+            safe_id = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in project_id)
+            
+            # Delete raw file
+            try:
+                from backend.config import RAW_DOCS_DIR
+                raw_file = RAW_DOCS_DIR / safe_id / filename_to_delete
+                if raw_file.exists():
+                    raw_file.unlink()
+            except Exception:
+                pass
+                
+            # Delete chunk jsonl
+            try:
+                from backend.config import CHUNKS_DIR
+                safe_stem = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in Path(filename_to_delete).stem)
+                chunk_file = CHUNKS_DIR / safe_id / f"{safe_stem}.jsonl"
+                if chunk_file.exists():
+                    chunk_file.unlink()
+            except Exception:
+                pass
+
+            # Delete metadata json
+            try:
+                from backend.config import METADATA_DIR
+                safe_stem = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in Path(filename_to_delete).stem)
+                meta_file = METADATA_DIR / safe_id / f"{safe_stem}.json"
+                if meta_file.exists():
+                    meta_file.unlink()
+            except Exception:
+                pass
+
+        return True
 
     def create_notebook(self, project_id: str, name: str) -> Dict[str, Any]:
         with self.lock:
@@ -238,3 +288,73 @@ class WorkspaceStore:
                 "cache_hit_rate": round(cache_hit_rate, 2),
                 "avg_query_latency_ms": round(avg_latency, 2),
             }
+
+    def delete_project(self, project_id: str) -> bool:
+        if project_id == "default":
+            return False
+
+        with self.lock:
+            # 1. Remove from projects list
+            original_len = len(self._state["projects"])
+            self._state["projects"] = [p for p in self._state["projects"] if p["id"] != project_id]
+            if len(self._state["projects"]) == original_len:
+                return False
+
+            # 2. Remove document listings and notebooks
+            self._state["project_docs"].pop(project_id, None)
+            self._state["project_notebooks"].pop(project_id, None)
+
+            # 3. Clean up chat history
+            self._state["chat_history"] = [c for c in self._state["chat_history"] if c.get("project_id") != project_id]
+
+            self._write(self._state)
+
+        import shutil
+        safe_id = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in project_id)
+
+        # 4. Clean up Knowledge Graph JSON file
+        try:
+            from backend.config import KNOWLEDGE_GRAPH_DIR
+            graph_file = KNOWLEDGE_GRAPH_DIR / f"{safe_id}.json"
+            if graph_file.exists():
+                graph_file.unlink()
+        except Exception:
+            pass
+
+        # 5. Clean up FAISS vector store directory
+        try:
+            from backend.config import VECTOR_DIR
+            project_vector_dir = VECTOR_DIR / safe_id
+            if project_vector_dir.exists():
+                shutil.rmtree(project_vector_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+        # 6. Clean up raw documents directory
+        try:
+            from backend.config import RAW_DOCS_DIR
+            project_raw_dir = RAW_DOCS_DIR / safe_id
+            if project_raw_dir.exists():
+                shutil.rmtree(project_raw_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+        # 7. Clean up chunk files directory
+        try:
+            from backend.config import CHUNKS_DIR
+            project_chunks_dir = CHUNKS_DIR / safe_id
+            if project_chunks_dir.exists():
+                shutil.rmtree(project_chunks_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+        # 8. Clean up metadata files directory
+        try:
+            from backend.config import METADATA_DIR
+            project_meta_dir = METADATA_DIR / safe_id
+            if project_meta_dir.exists():
+                shutil.rmtree(project_meta_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+        return True

@@ -1,48 +1,80 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from threading import Thread
+import logging
 from typing import List
+import requests
 
-import torch
+from backend.config import OLLAMA_HOST, OLLAMA_MODEL
+
+logger = logging.getLogger("offline_rag.llm")
 
 
 class LLMService:
-    def __init__(self, model_path: str = "models/llm/TinyLlama-1.1B-Chat-v1.0") -> None:
-        self.model_path = model_path
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
-        self._tokenizer = None
-        self._model = None
+    def __init__(self, ollama_host: str = OLLAMA_HOST, ollama_model: str = OLLAMA_MODEL, model_path: str = "") -> None:
+        self.ollama_host = ollama_host.rstrip("/")
+        self.ollama_model = ollama_model
 
     def _ensure_model_loaded(self) -> bool:
-        if self._model is not None and self._tokenizer is not None:
-            return True
+        """Pings the Ollama service to check if it's available. Automatically starts it if it's offline."""
+        import subprocess
+        import platform
+        import time
 
-        local_path = Path(self.model_path)
-        if not local_path.exists():
-            return False
+        def ping_ollama() -> bool:
+            try:
+                res = requests.get(f"{self.ollama_host}/api/tags", timeout=1.5)
+                return res.status_code == 200
+            except Exception:
+                return False
 
+        if not ping_ollama():
+            logger.info("Ollama is not active at %s. Attempting to start Ollama automatically...", self.ollama_host)
+            try:
+                model_base = self.ollama_model.split(":")[0]
+                if platform.system() == "Windows":
+                    # Start minimized command prompt that runs 'ollama run model'
+                    subprocess.Popen(
+                        ["cmd", "/c", "start", "/min", "ollama", "run", model_base],
+                        shell=True,
+                        creationflags=subprocess.CREATE_NEW_CONSOLE if hasattr(subprocess, "CREATE_NEW_CONSOLE") else 0
+                    )
+                else:
+                    subprocess.Popen(
+                        ["ollama", "run", model_base],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+
+                # Wait up to 8 seconds for the server to spin up and load
+                for attempt in range(8):
+                    time.sleep(1.0)
+                    if ping_ollama():
+                        logger.info("Ollama started and verified successfully!")
+                        break
+            except Exception as e:
+                logger.error("Failed to automatically launch Ollama: %s", e)
+
+        # Final verification check
         try:
-            from transformers import AutoModelForCausalLM, AutoTokenizer
-
-            self._tokenizer = AutoTokenizer.from_pretrained(str(local_path), local_files_only=True)
-            if self._tokenizer.pad_token is None:
-                self._tokenizer.pad_token = self._tokenizer.eos_token
-
-            self._model = AutoModelForCausalLM.from_pretrained(
-                str(local_path),
-                local_files_only=True,
-                low_cpu_mem_usage=True,
-                torch_dtype=self.torch_dtype,
-                device_map="auto" if self.device == "cuda" else None,
+            res = requests.get(f"{self.ollama_host}/api/tags", timeout=3.0)
+            if res.status_code != 200:
+                logger.error("Ollama connection active, but tags API returned status %d", res.status_code)
+                return False
+            
+            data = res.json()
+            models = [m.get("name") for m in data.get("models", [])]
+            target_model = self.ollama_model.lower()
+            model_exists = any(
+                target_model == m.lower() or target_model.split(":")[0] == m.lower().split(":")[0]
+                for m in models
             )
-            self._model.eval()
+            if not model_exists:
+                logger.warning("Model '%s' not explicitly found in Ollama models list: %s.", self.ollama_model, models)
+            
             return True
-        except Exception:
-            self._tokenizer = None
-            self._model = None
+        except Exception as exc:
+            logger.error("Ollama connection check failed at %s: %s", self.ollama_host, exc)
             return False
 
     def _infer_query_type(self, query: str) -> str:
@@ -91,7 +123,7 @@ class LLMService:
         return "Return clear plain text with short sections when needed."
 
     def _build_prompt(self, query: str, contexts: List[str], query_type: str, output_mode: str) -> str:
-        context_block = "\n\n".join(contexts[:8])
+        context_block = "\n\n".join(contexts[:10])  # Mistral handles larger context, let's allow up to 10 chunks!
         style_rule = {
             "factual": "Focus on factual precision and explicit uncertainty handling.",
             "coding": "Be implementation-focused and include practical snippets when useful.",
@@ -116,30 +148,6 @@ class LLMService:
             "ASSISTANT RESPONSE:"
         )
 
-    def _build_generate_kwargs(
-        self,
-        max_tokens: int,
-        temperature: float,
-        top_p: float,
-        generation_top_k: int,
-        frequency_penalty: float,
-        presence_penalty: float,
-    ) -> dict:
-        repetition_penalty = 1.0 + min(0.6, (frequency_penalty * 0.12) + (presence_penalty * 0.08))
-        do_sample = temperature > 0.05
-        return {
-            "max_new_tokens": max_tokens,
-            "min_new_tokens": 0,
-            "do_sample": do_sample,
-            "temperature": max(0.01, temperature),
-            "top_p": top_p,
-            "top_k": generation_top_k,
-            "repetition_penalty": repetition_penalty,
-            "no_repeat_ngram_size": 3,
-            "eos_token_id": self._tokenizer.eos_token_id,
-            "pad_token_id": self._tokenizer.pad_token_id,
-        }
-
     def generate_answer(
         self,
         query: str,
@@ -159,7 +167,8 @@ class LLMService:
         if not self._ensure_model_loaded():
             preview = "\n\n".join(contexts[:2])
             return (
-                "Local LLM is not loaded yet. Download a model into models/llm and retry.\n\n"
+                f"Ollama local LLM is not active or model '{self.ollama_model}' is not reachable at {self.ollama_host}.\n"
+                "Please run 'ollama run mistral' and restart the backend.\n\n"
                 f"Question: {query}\n\n"
                 f"Context preview:\n{preview[:1200]}"
             )
@@ -172,42 +181,48 @@ class LLMService:
             query_type=resolved_query_type,
             output_mode=resolved_output_mode,
         )
-        inputs = self._tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
 
-        if self.device == "cuda":
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        elif hasattr(self._model, "device"):
-            inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
+        payload = {
+            "model": self.ollama_model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "top_p": top_p,
+                "top_k": generation_top_k,
+                "num_predict": max_tokens,
+                "repeat_penalty": 1.0 + min(0.6, (frequency_penalty * 0.12) + (presence_penalty * 0.08)),
+            }
+        }
 
-        generate_kwargs = self._build_generate_kwargs(
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            generation_top_k=generation_top_k,
-            frequency_penalty=frequency_penalty,
-            presence_penalty=presence_penalty,
-        )
+        try:
+            res = requests.post(f"{self.ollama_host}/api/generate", json=payload, timeout=90.0)
+            res.raise_for_status()
+            data = res.json()
+            decoded = data.get("response", "").strip()
 
-        with torch.inference_mode():
-            if self.device == "cuda":
-                with torch.autocast(device_type="cuda", dtype=self.torch_dtype):
-                    output = self._model.generate(**inputs, **generate_kwargs)
-            else:
-                output = self._model.generate(**inputs, **generate_kwargs)
-
-        decoded = self._tokenizer.decode(output[0], skip_special_tokens=True)
-        if resolved_output_mode == "json":
-            candidate = decoded.split("ASSISTANT RESPONSE:", 1)[-1].strip()
-            try:
-                parsed = json.loads(candidate)
-                return json.dumps(parsed, indent=2)
-            except Exception:
-                pass
-        if "Answer:" in decoded:
-            return decoded.split("Answer:", 1)[-1].strip()
-        if "ASSISTANT RESPONSE:" in decoded:
-            return decoded.split("ASSISTANT RESPONSE:", 1)[-1].strip()
-        return decoded.strip()
+            if resolved_output_mode == "json":
+                candidate = decoded
+                if "```" in candidate:
+                    parts = candidate.split("```")
+                    for p in parts:
+                        p_strip = p.strip()
+                        if p_strip.startswith("json"):
+                            p_strip = p_strip[4:].strip()
+                        try:
+                            parsed = json.loads(p_strip)
+                            return json.dumps(parsed, indent=2)
+                        except Exception:
+                            pass
+                try:
+                    parsed = json.loads(candidate)
+                    return json.dumps(parsed, indent=2)
+                except Exception:
+                    pass
+            return decoded
+        except Exception as exc:
+            logger.error("Ollama generation failed: %s", exc)
+            return f"Error querying local Ollama: {exc}"
 
     def stream_answer_chunks(
         self,
@@ -230,13 +245,12 @@ class LLMService:
         if not self._ensure_model_loaded():
             preview = "\n\n".join(contexts[:2])
             yield (
-                "Local LLM is not loaded yet. Download a model into models/llm and retry.\n\n"
+                f"Ollama local LLM is not active or model '{self.ollama_model}' is not reachable at {self.ollama_host}.\n"
+                "Please run 'ollama run mistral' and restart the backend.\n\n"
                 f"Question: {query}\n\n"
                 f"Context preview:\n{preview[:1200]}"
             )
             return
-
-        from transformers import TextIteratorStreamer
 
         resolved_query_type = query_type if query_type != "auto" else self._infer_query_type(query)
         resolved_output_mode = self._resolve_output_mode(query=query, output_mode=output_mode)
@@ -246,46 +260,40 @@ class LLMService:
             query_type=resolved_query_type,
             output_mode=resolved_output_mode,
         )
-        inputs = self._tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
 
-        if self.device == "cuda":
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        elif hasattr(self._model, "device"):
-            inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
+        payload = {
+            "model": self.ollama_model,
+            "prompt": prompt,
+            "stream": True,
+            "options": {
+                "temperature": temperature,
+                "top_p": top_p,
+                "top_k": generation_top_k,
+                "num_predict": max_tokens,
+                "repeat_penalty": 1.0 + min(0.6, (frequency_penalty * 0.12) + (presence_penalty * 0.08)),
+            }
+        }
 
-        streamer = TextIteratorStreamer(
-            self._tokenizer,
-            skip_prompt=True,
-            skip_special_tokens=True,
-            timeout=120.0,
-        )
+        try:
+            res = requests.post(f"{self.ollama_host}/api/generate", json=payload, stream=True, timeout=90.0)
+            res.raise_for_status()
 
-        generate_kwargs = self._build_generate_kwargs(
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            generation_top_k=generation_top_k,
-            frequency_penalty=frequency_penalty,
-            presence_penalty=presence_penalty,
-        )
-        generate_kwargs["streamer"] = streamer
+            buffer = ""
+            for line in res.iter_lines():
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line.decode("utf-8"))
+                    piece = data.get("response", "")
+                    buffer += piece
+                    if len(buffer) >= chunk_chars or "\n\n" in buffer:
+                        yield buffer
+                        buffer = ""
+                except Exception:
+                    continue
 
-        def _generate() -> None:
-            with torch.inference_mode():
-                if self.device == "cuda":
-                    with torch.autocast(device_type="cuda", dtype=self.torch_dtype):
-                        self._model.generate(**inputs, **generate_kwargs)
-                else:
-                    self._model.generate(**inputs, **generate_kwargs)
-
-        Thread(target=_generate, daemon=True).start()
-
-        buffer = ""
-        for piece in streamer:
-            buffer += piece
-            if len(buffer) >= chunk_chars or "\n\n" in buffer:
+            if buffer:
                 yield buffer
-                buffer = ""
-
-        if buffer:
-            yield buffer
+        except Exception as exc:
+            logger.error("Ollama streaming failed: %s", exc)
+            yield f"\n[Streaming error: {exc}]"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Dict, List
+from threading import Lock
 
 import faiss
 import numpy as np
@@ -12,51 +13,109 @@ class RetrievalService:
     def __init__(self, vector_dir: Path, embedding_dim: int = 384) -> None:
         self.vector_dir = vector_dir
         self.vector_dir.mkdir(parents=True, exist_ok=True)
- 
-        self.index_path = self.vector_dir / "index.faiss"
-        self.meta_path = self.vector_dir / "metadata.json"
         self.embedding_dim = embedding_dim
+        
+        # In-memory index and metadata caching per project
+        self._indices: Dict[str, faiss.IndexFlatIP] = {}
+        self._metadata: Dict[str, List[Dict]] = {}
+        self._locks: Dict[str, Lock] = {}
+        self._global_lock = Lock()
 
-        self.index = self._load_or_create_index()
-        self.metadata = self._load_metadata()
+    def _get_project_dir(self, project_id: str) -> Path:
+        # Standardize project ID to prevent directory traversal
+        safe_id = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in project_id)
+        project_dir = self.vector_dir / safe_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        return project_dir
 
-    def _load_or_create_index(self) -> faiss.IndexFlatIP:
-        if self.index_path.exists():
-            return faiss.read_index(str(self.index_path))
-        return faiss.IndexFlatIP(self.embedding_dim)
+    def _ensure_project_loaded(self, project_id: str) -> None:
+        with self._global_lock:
+            if project_id not in self._locks:
+                self._locks[project_id] = Lock()
 
-    def _load_metadata(self) -> List[Dict]:
-        if self.meta_path.exists():
-            return json.loads(self.meta_path.read_text(encoding="utf-8"))
-        return []
+        with self._locks[project_id]:
+            if project_id in self._indices:
+                return
 
-    def _persist(self) -> None:
-        faiss.write_index(self.index, str(self.index_path))
-        self.meta_path.write_text(json.dumps(self.metadata, indent=2), encoding="utf-8")
+            project_dir = self._get_project_dir(project_id)
+            index_path = project_dir / "index.faiss"
+            meta_path = project_dir / "metadata.json"
 
-    def add_chunks(self, vectors: np.ndarray, chunk_metadata: List[Dict]) -> None:
+            if index_path.exists():
+                try:
+                    self._indices[project_id] = faiss.read_index(str(index_path))
+                except Exception:
+                    self._indices[project_id] = faiss.IndexFlatIP(self.embedding_dim)
+            else:
+                self._indices[project_id] = faiss.IndexFlatIP(self.embedding_dim)
+
+            if meta_path.exists():
+                try:
+                    self._metadata[project_id] = json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    self._metadata[project_id] = []
+            else:
+                self._metadata[project_id] = []
+
+    def get_index_size(self, project_id: str) -> int:
+        self._ensure_project_loaded(project_id)
+        with self._locks[project_id]:
+            return int(self._indices[project_id].ntotal)
+
+    def get_total_chunks(self) -> int:
+        """Sums up the chunks indexed across all projects currently persisted."""
+        total = 0
+        try:
+            for path in self.vector_dir.glob("*/metadata.json"):
+                try:
+                    meta = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(meta, list):
+                        total += len(meta)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return total
+
+    def add_chunks(self, project_id: str, vectors: np.ndarray, chunk_metadata: List[Dict]) -> None:
         if vectors.size == 0:
             return
 
-        self.index.add(vectors)
-        self.metadata.extend(chunk_metadata)
-        self._persist()
+        self._ensure_project_loaded(project_id)
+        with self._locks[project_id]:
+            index = self._indices[project_id]
+            meta = self._metadata[project_id]
 
-    def search(self, query_vector: np.ndarray, top_k: int = 5) -> List[Dict]:
-        if self.index.ntotal == 0:
-            return []
+            index.add(vectors.astype(np.float32))
+            meta.extend(chunk_metadata)
 
-        query = np.expand_dims(query_vector, axis=0).astype(np.float32)
-        scores, indices = self.index.search(query, top_k)
+            # Persist project specific files
+            project_dir = self._get_project_dir(project_id)
+            faiss.write_index(index, str(project_dir / "index.faiss"))
+            project_dir.joinpath("metadata.json").write_text(
+                json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
 
-        results: List[Dict] = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx < 0 or idx >= len(self.metadata):
-                continue
+    def search(self, project_id: str, query_vector: np.ndarray, top_k: int = 5) -> List[Dict]:
+        self._ensure_project_loaded(project_id)
+        with self._locks[project_id]:
+            index = self._indices[project_id]
+            meta = self._metadata[project_id]
 
-            item = dict(self.metadata[idx])
-            item["score"] = float(score)
-            item["chunk_id"] = int(idx)
-            results.append(item)
+            if index.ntotal == 0:
+                return []
 
-        return results
+            query = np.expand_dims(query_vector, axis=0).astype(np.float32)
+            scores, indices = index.search(query, top_k)
+
+            results: List[Dict] = []
+            for score, idx in zip(scores[0], indices[0]):
+                if idx < 0 or idx >= len(meta):
+                    continue
+
+                item = dict(meta[idx])
+                item["score"] = float(score)
+                item["chunk_id"] = int(idx)
+                results.append(item)
+
+            return results

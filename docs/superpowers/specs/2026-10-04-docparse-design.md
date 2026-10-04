@@ -188,7 +188,11 @@ step)`) and then attributes pages with `min(idx, len(base_meta) - 1)`,
 which is not a page lookup but a clamp — every chunk past the first
 few is attributed to the last page.
 
-**Determinism:** identical input bytes produce byte-identical JSONL.
+**Determinism:** with `--jobs 1`, identical input bytes produce
+byte-identical JSONL. With more workers, each file's lines remain
+contiguous and ordered, but files appear in completion order. Restoring
+input order would require buffering the whole corpus, which contradicts
+the memory ceiling.
 
 ## Section 5 — Error handling
 
@@ -206,8 +210,20 @@ few is attributed to the last page.
 
 ## Section 6 — Memory ceiling
 
-Target: peak RSS below 64 MB for any single input file, regardless of
-that file's size.
+Target: peak RSS below 64 MB for any single input file.
+
+**Measured caveat, recorded 2026-10-04.** The original wording of this
+section said "regardless of that file's size." That is true of page
+*content* but false of total memory for large PDFs, so it has been
+corrected rather than defended. `docparse`'s own allocation is genuinely
+flat — 0.06 MB of peak heap for a synthetic 5,000-page source producing
+90,000 chunks, and unchanged between 100 and 2,000 pages. But PDFium
+retains roughly 3.4 KB per page of document index (page tree, xref) when
+it opens a file, which it does not release. Measured peak RSS, debug
+build: 9.3 MB at 2 pages, 22.5 MB at 3,000, 50.7 MB at 12,000. By
+extrapolation a PDF of roughly 16,000-17,000 simple pages would cross
+64 MB. Reaching constant memory on documents that large would require
+splitting the PDF before parsing, which is out of scope.
 
 Enforced structurally:
 
@@ -227,10 +243,12 @@ A test asserts this ceiling rather than leaving it as an aspiration.
 - **Property test:** concatenating a document's chunks, minus overlap,
   reproduces every block's text — no text lost, none duplicated beyond
   the declared overlap.
-- **Determinism test:** two runs over the same input produce identical
-  bytes.
-- **Memory test:** a large synthetic PDF, asserting peak RSS stays
-  under the ceiling.
+- **Determinism test:** two `--jobs 1` runs over the same input produce
+  identical bytes.
+- **Memory test:** a large synthetic multi-page source, asserting peak
+  *heap* (via a tracking global allocator, not RSS) stays under the
+  ceiling. It therefore excludes the binary, thread stacks and anything
+  PDFium allocates internally.
 - **Error isolation test:** a corrupt file inside a batch; the batch
   completes and the exit code is 2.
 - **Benchmarks** (criterion): pages/second and MB/second, to be

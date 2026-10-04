@@ -3,129 +3,147 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Offline RAG Workspace</title>
+  <title>Offline Notebook - Document Intelligence</title>
   <link rel="stylesheet" href="/ui/styles.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 </head>
 <body>
   <header class="topbar">
-    <a id="home-link" class="brand" href="#/dashboard">
-      <span class="brand-mark">R</span>
+    <a id="home-link" class="brand" href="#/workspace">
+      <span class="brand-mark">N</span>
       <span>
-        <strong>Offline RAG</strong>
-        <small>Document question answering</small>
+        <strong>Offline Notebook</strong>
+        <small>AI Document Intelligence</small>
       </span>
     </a>
     <span id="status-pill" class="status-pill">Ready</span>
   </header>
 
   <div class="shell">
+    <!-- Left Sidebar: Houses Sources and Library Navigator -->
     <aside class="sidebar">
-      <button id="sidebar-new-project" class="button primary full" type="button">New Project</button>
+      <!-- Sidebar Header / Back to Library Link -->
+      <div class="sidebar-header">
+        <a href="#/dashboard" class="sidebar-back-link">
+          <span class="back-arrow">←</span>
+          <span>All Notebooks</span>
+        </a>
+      </div>
 
-      <nav class="nav" aria-label="Main navigation">
-        <button class="nav-button active" type="button" data-view="dashboard">Dashboard</button>
-        <button class="nav-button" type="button" data-view="workspace">Chat</button>
-      </nav>
-
+      <!-- Section: Sources (Documents in Active Notebook) -->
       <div class="sidebar-section">
-        <h2>Projects</h2>
-        <div id="shell-projects" class="stack"></div>
+        <div class="sources-head">
+          <h2>Sources</h2>
+          <span id="sources-count" class="badge">0</span>
+        </div>
+        
+        <!-- Simplified Document Search Box -->
+        <div class="search compact-search">
+          <input id="doc-search" placeholder="Search sources..." />
+        </div>
+
+        <!-- Inline Source Uploader -->
+        <div class="upload-row">
+          <label for="chat-upload-files" class="custom-file-upload">
+            <span>+ Add Source</span>
+            <input id="chat-upload-files" type="file" multiple />
+          </label>
+          <button id="chat-upload-btn" class="button primary small hidden" type="button">Upload</button>
+        </div>
+
+        <div id="chat-documents" class="stack document-list-stack"></div>
       </div>
     </aside>
 
+    <!-- Right Area: Unified Workspace -->
     <main class="main">
-      <section id="view-dashboard" class="view active">
-        <div class="page-head">
-          <div>
-            <p class="eyebrow">Overview</p>
-            <h1>Dashboard</h1>
+      <!-- Dashboard Library Landing Selector View -->
+      <section id="view-dashboard" class="view dashboard-view active">
+        <div class="dashboard-head">
+          <div class="dashboard-title-area">
+            <p class="eyebrow">Your Library</p>
+            <h1>Notebooks</h1>
           </div>
-          <button id="dashboard-create-project" class="button primary" type="button">Create Project</button>
+          <button id="dashboard-new-project-btn" class="button primary" type="button">+ New Notebook</button>
         </div>
 
-        <div id="dashboard-cards" class="metric-grid"></div>
-
-        <div class="two-column">
-          <section class="panel">
-            <h2>Recent Projects</h2>
-            <div id="recent-projects" class="stack"></div>
-          </section>
-
-          <section class="panel">
-            <h2>Recent Chats</h2>
-            <div id="recent-chats" class="stack"></div>
-          </section>
+        <div id="dashboard-notebooks-grid" class="notebook-grid">
+          <!-- Notebook cards will be rendered here dynamically -->
         </div>
       </section>
 
-      <section id="view-create-project" class="view">
-        <div class="page-head compact">
-          <div>
-            <p class="eyebrow">Set up documents</p>
-            <h1>Create Project</h1>
-          </div>
-        </div>
-
-        <section class="panel form-panel">
-          <form id="project-form">
-            <label for="project-name">Project name</label>
-            <input id="project-name" required minlength="2" maxlength="100" placeholder="Example: Research notes" />
-
-            <label for="project-files">Documents</label>
-            <div id="project-drop-zone" class="drop-zone" role="button" tabindex="0">
-              <strong>Drop files here</strong>
-              <span>or click to select files</span>
-              <input id="project-files" type="file" multiple hidden />
-            </div>
-
-            <div class="inline-title">
-              <label>Selected files</label>
-              <button id="clear-project-files" class="button secondary small" type="button">Clear</button>
-            </div>
-            <div id="project-files-preview" class="stack"></div>
-
-            <button id="project-submit-btn" class="button primary full" type="submit">Create Project</button>
-            <div id="upload-result" class="notice" aria-live="polite"></div>
-          </form>
-        </section>
-      </section>
-
+      <!-- Active Workspace view (Hides when dashboard is active) -->
       <section id="view-workspace" class="view workspace-view">
-        <div class="workspace">
-          <section class="chat-panel">
-            <div class="workspace-head">
-              <div>
-                <p class="eyebrow">Current project</p>
-                <h1 id="chat-project-name">Default Project</h1>
+        <div class="workspace-head-container">
+          <div class="workspace-info">
+            <p class="eyebrow">Active Notebook</p>
+            <h1 id="chat-project-name">Default Notebook</h1>
+          </div>
+          
+          <!-- Sleek Tab Switcher -->
+          <div class="workspace-tabs" role="tablist">
+            <button id="tab-btn-chat" class="tab-button active" type="button" role="tab" aria-selected="true" data-tab="chat">Chat</button>
+            <button id="tab-btn-graph" class="tab-button" type="button" role="tab" aria-selected="false" data-tab="graph">Knowledge Graph</button>
+          </div>
+        </div>
+
+        <div class="workspace-panels">
+          <!-- PANEL A: Chat Interface -->
+          <div id="panel-chat" class="workspace-panel active">
+            <!-- Welcome screen shown if active notebook has no uploaded sources -->
+            <div id="notebook-welcome" class="notebook-welcome hidden">
+              <div class="welcome-box">
+                <span class="welcome-icon">📚</span>
+                <h2>Welcome to your Offline Notebook</h2>
+                <p>To get started, click <strong>+ Add Source</strong> in the sidebar to upload PDFs, images, or documents. Once uploaded, Mistral 7B will automatically process them and extract key relationship maps.</p>
               </div>
             </div>
 
+            <!-- Standard Chat Messages -->
             <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
 
             <form id="chat-form" class="chat-form">
-              <textarea id="chat-input" rows="1" placeholder="Ask a question about this project's documents"></textarea>
+              <textarea id="chat-input" rows="1" placeholder="Ask a question about your sources..."></textarea>
               <button id="chat-send-btn" class="button primary send-button" type="submit">Send</button>
             </form>
-          </section>
+          </div>
 
-          <aside class="documents-panel">
-            <section class="panel">
-              <h2>Documents</h2>
-              <div class="search">
-                <input id="doc-search" placeholder="Search documents" />
+          <!-- PANEL B: Knowledge Graph Visualization -->
+          <div id="panel-graph" class="workspace-panel">
+            <div class="graph-header-controls">
+              <span class="graph-sub-title">Entity Relationship Network Map</span>
+              <button id="refresh-graph-btn" class="button secondary small" type="button">Sync Graph</button>
+            </div>
+            
+            <div class="graph-layout">
+              <div class="panel graph-canvas-panel">
+                <canvas id="graph-canvas"></canvas>
+                <div class="graph-controls">
+                  <button id="graph-zoom-in" type="button" title="Zoom In">+</button>
+                  <button id="graph-zoom-out" type="button" title="Zoom Out">-</button>
+                  <button id="graph-reset" type="button" title="Reset View">Reset</button>
+                </div>
+                <div id="graph-loading" class="graph-overlay hidden">
+                  <div class="spinner"></div>
+                  <span>Mapping relationships in the background...</span>
+                </div>
+                <div id="graph-empty" class="graph-overlay hidden">
+                  <span>No relationships mapped yet. Add document sources in the left sidebar to start generating!</span>
+                </div>
               </div>
-              <div class="upload-row">
-                <input id="chat-upload-files" type="file" multiple />
-                <button id="chat-upload-btn" class="button primary" type="button">Add Files</button>
-              </div>
-              <div id="chat-documents" class="stack document-list"></div>
-            </section>
 
-            <section class="panel">
-              <h2>Sources</h2>
-              <div id="source-list" class="stack"></div>
-            </section>
-          </aside>
+              <!-- Sleek Node Inspector Sidebar -->
+              <aside class="panel graph-inspector">
+                <h2>Inspector</h2>
+                <hr class="inspector-hr" />
+                <div id="inspector-content" class="inspector-content">
+                  <div class="empty-state">Click on any entity node or connection line to inspect details.</div>
+                </div>
+              </aside>
+            </div>
+          </div>
         </div>
       </section>
     </main>

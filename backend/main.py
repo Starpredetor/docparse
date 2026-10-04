@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.config import EMBEDDING_MODEL_DIR, LLM_MODEL_DIR, RAW_DOCS_DIR, VECTOR_DIR, VISION_MODEL_DIR, WARMUP_MODELS_ON_STARTUP, WORKSPACE_STATE_FILE, ensure_directories, reset_runtime_storage
+from backend.config import EMBEDDING_MODEL_DIR, RAW_DOCS_DIR, VECTOR_DIR, VISION_MODEL_DIR, WARMUP_MODELS_ON_STARTUP, WORKSPACE_STATE_FILE, ensure_directories
 from backend.logging_config import configure_logging
 from backend.runtime import configure_runtime
 from backend.routes.query import get_router as get_query_router
@@ -27,18 +27,19 @@ from backend.services.llm import LLMService
 from backend.services.retrieval import RetrievalService
 from backend.services.vision import VisionService
 from backend.services.workspace import WorkspaceStore
+from backend.services.knowledge_graph import KnowledgeGraphService
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 configure_logging(BASE_DIR)
 configure_runtime()
-reset_runtime_storage()
 
 embedding_service = EmbeddingService(model_name=str(EMBEDDING_MODEL_DIR))
 retrieval_service = RetrievalService(vector_dir=VECTOR_DIR)
 vision_service = VisionService(model_path=str(VISION_MODEL_DIR))
 ingestion_service = IngestionService(vision_service=vision_service)
-llm_service = LLMService(model_path=str(LLM_MODEL_DIR))
+llm_service = LLMService()
+knowledge_graph_service = KnowledgeGraphService()
 workspace_store = WorkspaceStore(data_file=WORKSPACE_STATE_FILE)
 
 app = FastAPI(title="Offline Multimodal RAG API", version="0.1.0")
@@ -96,6 +97,7 @@ app.include_router(
         retrieval_service=retrieval_service,
         raw_docs_dir=RAW_DOCS_DIR,
         workspace_store=workspace_store,
+        knowledge_graph_service=knowledge_graph_service,
     )
 )
 app.include_router(
@@ -104,12 +106,14 @@ app.include_router(
         retrieval_service=retrieval_service,
         llm_service=llm_service,
         workspace_store=workspace_store,
+        knowledge_graph_service=knowledge_graph_service,
     )
 )
 app.include_router(
     get_workspace_router(
         workspace_store=workspace_store,
         retrieval_service=retrieval_service,
+        knowledge_graph_service=knowledge_graph_service,
     )
 )
 

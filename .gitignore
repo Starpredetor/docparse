@@ -30,3 +30,10 @@ models/embeddings/*
 !models/embeddings/.gitkeep
 models/vision/*
 !models/vision/.gitkeep
+
+*.log
+# Rust build artifacts (docparse)
+target/
+
+# subagent-driven-development scratch workspace
+.superpowers/

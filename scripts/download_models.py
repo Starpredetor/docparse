@@ -8,7 +8,6 @@ ROOT = Path(__file__).resolve().parents[1]
 MODELS_DIR = ROOT / "models"
 
 EMBEDDING_REPO = "sentence-transformers/all-MiniLM-L6-v2"
-LLM_REPO = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 VISION_REPO = "Salesforce/blip-image-captioning-base"
 
 
@@ -25,35 +24,6 @@ def download_embedding() -> Path:
         repo_id=EMBEDDING_REPO,
         local_dir=str(target),
         local_dir_use_symlinks=False,
-    )
-    return target
-
-
-def download_llm() -> Path:
-    target = MODELS_DIR / "llm" / "TinyLlama-1.1B-Chat-v1.0"
-    target.mkdir(parents=True, exist_ok=True)
-    
-    # Check if model is already downloaded
-    if (target / "config.json").exists() and ((target / "pytorch_model.bin").exists() or (target / "model.safetensors").exists()):
-        print(f"LLM model already downloaded: {target}")
-        return target
-    
-    snapshot_download(
-        repo_id=LLM_REPO,
-        local_dir=str(target),
-        local_dir_use_symlinks=False,
-        allow_patterns=[
-            "*.json",
-            "*.txt",
-            "*.md",
-            "*.model",
-            "*.py",
-            "*.bin",
-            "*.safetensors",
-            "*.tiktoken",
-            "tokenizer*",
-            "generation_config.json",
-        ],
     )
     return target
 
@@ -89,9 +59,6 @@ def download_vision() -> Path:
 if __name__ == "__main__":
     emb_path = download_embedding()
     print(f"Embedding model ready: {emb_path}")
-
-    llm_path = download_llm()
-    print(f"LLM model ready: {llm_path}")
 
     vision_path = download_vision()
     print(f"Vision model ready: {vision_path}")
