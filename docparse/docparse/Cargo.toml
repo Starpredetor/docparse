@@ -1,0 +1,29 @@
+[package]
+name = "docparse"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+quick-xml = { version = "0.37", optional = true }
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
+# The compiled pdfium_NNNN feature must match or predate the deployed
+# pdfium.dll. The DLL shipped here is build 7802 (from the project's Python
+# venv via pypdfium2). `pdfium_latest` (7881) fails at runtime with a
+# GetProcAddress error 127. `default-features = false` is required because
+# the defaults also pull in the `image` crate.
+pdfium-render = { version = "0.9", default-features = false, features = ["pdfium_7763", "thread_safe"], optional = true }
+
+[features]
+default = ["docx", "pdf"]
+pdf = ["dep:pdfium-render"]
+docx = ["dep:quick-xml", "dep:zip"]
+
+[dev-dependencies]
+serde_json = { workspace = true }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tempfile = "3"
+peak_alloc = "0.2"
