@@ -1,39 +1,17 @@
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.sqlite3
-
-.venv/
-venv/
-
-.env
-
-data/vector_store/index.faiss
-data/vector_store/metadata.json
-
-data/raw_docs/*
-!data/raw_docs/.gitkeep
-!data/raw_docs/papers/.gitkeep
-!data/raw_docs/textbooks/.gitkeep
-!data/raw_docs/notes/.gitkeep
-!data/raw_docs/images/.gitkeep
-
-data/processed/*
-!data/processed/.gitkeep
-!data/processed/chunks/.gitkeep
-!data/processed/metadata/.gitkeep
-
-models/llm/*
-!models/llm/.gitkeep
-models/embeddings/*
-!models/embeddings/.gitkeep
-models/vision/*
-!models/vision/.gitkeep
-
-*.log
-# Rust build artifacts (docparse)
+# Rust build artifacts
 target/
 
+# Document corpus (local; 94 MB of PDFs, not source)
+corpus/
+
+# Python virtualenv — still used to generate test fixtures (PyMuPDF, Pillow)
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+.env
+*.log
+
 # subagent-driven-development scratch workspace
-.superpowers/
+.superpowers/*
