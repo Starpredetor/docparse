@@ -15,6 +15,12 @@ pub mod docx;
 #[cfg(feature = "pdf")]
 pub mod pdf;
 
+#[cfg(feature = "image")]
+pub mod image;
+
+#[cfg(feature = "ocr")]
+pub mod ocr;
+
 pub use chunk::{split_sentences, ChunkConfig, Chunker};
 pub use error::{Error, Result};
 pub use model::{Block, BlockKind, BlockRef, Chunk, Page, PageOrigin, Rect};

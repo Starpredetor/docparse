@@ -16,9 +16,14 @@ zip = { version = "2", default-features = false, features = ["deflate"], optiona
 # GetProcAddress error 127. `default-features = false` is required because
 # the defaults also pull in the `image` crate.
 pdfium-render = { version = "0.9", default-features = false, features = ["pdfium_7763", "thread_safe"], optional = true }
+# Only used to validate and size input images; no codecs beyond these.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp", "tiff"], optional = true }
 
 [features]
-default = ["docx", "pdf"]
+default = ["docx", "pdf", "image"]
+image = ["dep:image"]
+# OCR shells out to the `tesseract` executable (see src/ocr.rs). Off by default.
+ocr = ["image"]
 pdf = ["dep:pdfium-render"]
 docx = ["dep:quick-xml", "dep:zip"]
 
@@ -27,3 +32,8 @@ serde_json = { workspace = true }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tempfile = "3"
 peak_alloc = "0.2"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "throughput"
+harness = false

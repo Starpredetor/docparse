@@ -17,6 +17,7 @@ rayon = "1"
 
 [features]
 default = ["docparse/default"]
+ocr = ["docparse/ocr"]
 
 [dev-dependencies]
 tempfile = "3"

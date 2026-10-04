@@ -60,6 +60,22 @@ struct Args {
     /// together but files appear in completion order, not input order.
     #[arg(short, long)]
     jobs: Option<usize>,
+
+    /// OCR PDF pages that yield no extractable text. Off by default: it is
+    /// slow and its output is a guess rather than extracted text. Image
+    /// files are always OCR'd and need no flag. Needs a build with the `ocr`
+    /// feature and the tesseract executable. MEMORY: the 64 MB budget does
+    /// NOT hold under OCR, at any job count. Measured
+    /// A4 scans at 150 DPI use about 52 MB in-process plus a ~62 MB tesseract
+    /// process at --jobs 1, and about 152 MB plus ~213 MB total at --jobs 4.
+    /// Budget roughly 50 MB plus a comparable tesseract per worker.
+    #[arg(long)]
+    ocr: bool,
+
+    /// Render DPI for OCR. Higher is more accurate; the page bitmap grows
+    /// with the square of the DPI.
+    #[arg(long, default_value_t = 150)]
+    ocr_dpi: u32,
 }
 
 fn main() {
@@ -166,10 +182,10 @@ fn run(args: &Args, out: &mut (dyn Write + Send)) -> Outcome {
         // keeps input order, so output is byte-identical across runs.
         inputs
             .iter()
-            .map(|path| process_file(path, args.emit, cfg, out))
+            .map(|path| process_file(path, args.emit, cfg, args.ocr, args.ocr_dpi, out))
             .collect()
     } else {
-        run_parallel(&inputs, args.emit, cfg, jobs, out)
+        run_parallel(&inputs, args.emit, cfg, (args.ocr, args.ocr_dpi), jobs, out)
     };
 
     let mut ok = 0usize;
@@ -211,6 +227,7 @@ fn run_parallel(
     inputs: &[PathBuf],
     emit: Emit,
     cfg: ChunkConfig,
+    (ocr, ocr_dpi): (bool, u32),
     jobs: usize,
     out: &mut (dyn Write + Send),
 ) -> Vec<std::result::Result<(), FileError>> {
@@ -237,7 +254,7 @@ fn run_parallel(
             .par_iter()
             .map(|path| {
                 let mut buffer: Vec<u8> = Vec::new();
-                let parsed = process_file(path, emit, cfg, &mut buffer);
+                let parsed = process_file(path, emit, cfg, ocr, ocr_dpi, &mut buffer);
 
                 // Flush whatever was produced even if the file failed
                 // partway, matching the --jobs 1 behaviour in --help.
@@ -260,9 +277,11 @@ fn process_file(
     path: &Path,
     emit: Emit,
     cfg: ChunkConfig,
+    ocr: bool,
+    ocr_dpi: u32,
     out: &mut (dyn Write + Send),
 ) -> std::result::Result<(), FileError> {
-    let source = open_source(path)?;
+    let source = open_source(path, ocr, ocr_dpi)?;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -295,6 +314,13 @@ fn process_file(
                         })
                     })?;
                     if let Some(map) = value.as_object_mut() {
+                        // Provenance: an OCR guess must be distinguishable from
+                        // extracted text. Adds `origin` and, for OCR, `confidence`.
+                        if let Ok(serde_json::Value::Object(origin)) =
+                            serde_json::to_value(page.origin)
+                        {
+                            map.extend(origin);
+                        }
                         map.insert("page".into(), page.number.into());
                         map.insert("source".into(), name.clone().into());
                     }
@@ -309,7 +335,7 @@ fn process_file(
 
 /// The single dispatch point. Every backend task registers here and
 /// nothing else in the CLI needs to know which formats exist.
-fn open_source(path: &Path) -> Result<Box<dyn Source>> {
+fn open_source(path: &Path, ocr: bool, ocr_dpi: u32) -> Result<Box<dyn Source>> {
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -317,7 +343,14 @@ fn open_source(path: &Path) -> Result<Box<dyn Source>> {
 
     match ext.as_str() {
         "docx" => Ok(Box::new(docparse::docx::DocxSource::open(path)?)),
-        "pdf" => Ok(Box::new(docparse::pdf::PdfSource::open(path)?)),
+        "pdf" => Ok(Box::new(
+            docparse::pdf::PdfSource::open(path)?.with_ocr(ocr, ocr_dpi),
+        )),
+
+        // Always OCR: without the `ocr` feature this is `OcrUnavailable`.
+        "png" | "jpg" | "jpeg" | "webp" | "bmp" | "tif" | "tiff" => {
+            Ok(Box::new(docparse::image::ImageSource::open(path)?))
+        }
 
         _ => Err(Error::Unsupported {
             path: path.to_path_buf(),

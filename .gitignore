@@ -15,3 +15,6 @@ __pycache__/
 
 # subagent-driven-development scratch workspace
 .superpowers/*
+
+# Tool output (the README writes out.jsonl into the repo root)
+*.jsonl

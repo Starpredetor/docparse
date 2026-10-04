@@ -92,8 +92,11 @@ pub struct Chunker<S: Source> {
     source: S,
     document: String,
     cfg: ChunkConfig,
-    /// Sentences read but not yet emitted. Bounded by one page's text,
-    /// which is what makes the memory ceiling structural rather than tuned.
+    /// Sentences read but not yet emitted. With `cross_page: false` this is
+    /// bounded by one page's text. With `cross_page: true` it is bounded by
+    /// the residue carried over (under `target_chars`) plus one page plus the
+    /// overlap tail. The regression test pinning this is
+    /// `cross_page_mode_buffers_a_bounded_number_of_pages`.
     pending: Vec<Sentence>,
     ready: VecDeque<Chunk>,
     next_id: u64,

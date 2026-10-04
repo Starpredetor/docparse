@@ -115,3 +115,40 @@ fn pdf_blocks_are_lines_not_paragraphs() {
         .iter()
         .all(|b| b.kind == docparse::BlockKind::Line));
 }
+
+#[test]
+fn scanned_pdf_page_yields_no_blocks_unless_ocr_is_requested() {
+    let mut source = PdfSource::open(&fixture("scanned.pdf")).unwrap();
+    let page = source.next_page().unwrap().unwrap();
+    assert!(page.blocks.is_empty());
+    assert_eq!(page.origin, PageOrigin::Native);
+}
+
+#[cfg(feature = "ocr")]
+#[test]
+fn ocr_flag_reads_a_scanned_pdf_page_and_marks_it_as_ocr() {
+    let mut source = PdfSource::open(&fixture("scanned.pdf"))
+        .unwrap()
+        .with_ocr(true, 150);
+    let page = source.next_page().unwrap().unwrap();
+    assert!(
+        matches!(page.origin, PageOrigin::Ocr { .. }),
+        "{:?}",
+        page.origin
+    );
+    let text: String = page.blocks.iter().map(|b| b.text.as_str()).collect();
+    assert!(text.to_lowercase().contains("hello"), "got {text:?}");
+}
+
+#[cfg(not(feature = "ocr"))]
+#[test]
+fn ocr_requested_without_the_feature_is_an_error_not_an_empty_page() {
+    let mut source = PdfSource::open(&fixture("scanned.pdf"))
+        .unwrap()
+        .with_ocr(true, 150);
+    let err = source.next_page().unwrap().unwrap_err();
+    assert!(
+        matches!(err, docparse::Error::OcrUnavailable { .. }),
+        "{err:?}"
+    );
+}

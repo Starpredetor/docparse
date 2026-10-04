@@ -307,3 +307,40 @@ fn single_job_output_is_byte_identical_across_runs() {
     assert!(!first.is_empty(), "expected output, got none");
     assert_eq!(first, run_once());
 }
+
+#[test]
+fn blocks_mode_carries_the_page_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_docx(dir.path(), "a.docx", &["Hello there."]);
+    let out = Command::new(binary())
+        .args(["--emit", "blocks"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"origin\":\"synthesized\""),
+        "got {stdout}"
+    );
+}
+
+#[test]
+fn blocks_mode_marks_ocr_text_as_ocr_with_confidence() {
+    let image =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docparse/tests/fixtures/hello_ocr.png");
+    let out = Command::new(binary())
+        .args(["--emit", "blocks"])
+        .arg(&image)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if out.status.success() {
+        // Built with OCR: the guess must be labelled as one.
+        assert!(stdout.contains("\"origin\":\"ocr\""), "got {stdout}");
+        assert!(stdout.contains("\"confidence\":"), "got {stdout}");
+    } else {
+        // Built without OCR: it must refuse, not emit empty success.
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("OCR"));
+    }
+}

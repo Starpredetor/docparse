@@ -34,7 +34,7 @@ pub enum Error {
         detail: String,
     },
 
-    #[error("{path}: page has no extractable text and OCR is not enabled")]
+    #[error("{path}: this input needs OCR (an image, or a PDF page with no text and --ocr given), but OCR support is not compiled in; rebuild with the `ocr` feature")]
     OcrUnavailable { path: PathBuf },
 }
 
