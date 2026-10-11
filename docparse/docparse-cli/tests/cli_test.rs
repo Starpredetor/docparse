@@ -344,3 +344,356 @@ fn blocks_mode_marks_ocr_text_as_ocr_with_confidence() {
         assert!(String::from_utf8_lossy(&out.stderr).contains("OCR"));
     }
 }
+
+#[test]
+fn subcommands_are_listed_in_help() {
+    let out = Command::new(binary()).arg("--help").output().unwrap();
+    let help = String::from_utf8(out.stdout).unwrap();
+    for sub in ["status", "export"] {
+        assert!(help.contains(sub), "--help should list `{sub}`:\n{help}");
+    }
+}
+
+#[test]
+fn a_file_named_like_a_subcommand_still_streams() {
+    // `index` is a subcommand, but `index.pdf` is a filename. clap matches
+    // subcommands on the exact word, so this must stream, not index.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_docx(
+        dir.path(),
+        "index.docx",
+        &["Content in a file named index."],
+    );
+
+    let out = Command::new(binary()).arg(&path).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("Content in a file named index."),
+        "expected streamed JSONL, got: {stdout}"
+    );
+    assert!(
+        !dir.path().join(".docparse").exists(),
+        "must not create an index"
+    );
+}
+
+#[test]
+fn a_subcommand_word_after_a_flag_gets_a_helpful_error() {
+    let out = Command::new(binary())
+        .args(["--chunk", "400", "index", "."])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("is a subcommand"), "stderr: {stderr}");
+}
+
+// --- docparse status -------------------------------------------------------
+
+fn run_cli(dir: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(binary()).args(args).arg(dir).output().unwrap()
+}
+
+fn index_dir_cli(dir: &Path) {
+    let out = run_cli(dir, &["index"]);
+    assert_eq!(out.status.code(), Some(0), "index failed: {out:?}");
+}
+
+fn three(dir: &Path) {
+    write_docx(dir, "a.docx", &["Alpha document text."]);
+    write_docx(dir, "b.docx", &["Bravo document text."]);
+    write_docx(dir, "c.docx", &["Charlie document text."]);
+}
+
+fn push_mtime_forward(path: &Path) {
+    let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+        .unwrap();
+}
+
+fn dir_listing(dir: &Path) -> Vec<std::ffi::OsString> {
+    let mut v: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    v.sort();
+    v
+}
+
+/// The lines under `heading (n):` up to the next unindented line.
+fn section_of(stdout: &str, heading: &str) -> Vec<String> {
+    let mut lines = stdout.lines();
+    let mut found = Vec::new();
+    while let Some(l) = lines.next() {
+        if l.starts_with(&format!("{heading} (")) {
+            for item in lines.by_ref() {
+                if item.starts_with("  ") {
+                    found.push(item.trim().to_string());
+                } else {
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    found
+}
+
+#[test]
+fn status_reports_each_category() {
+    let tmp = tempfile::tempdir().unwrap();
+    three(tmp.path());
+    index_dir_cli(tmp.path());
+
+    write_docx(tmp.path(), "a.docx", &["Alpha, now edited."]); // modified
+    std::fs::remove_file(tmp.path().join("b.docx")).unwrap(); // deleted
+    write_docx(tmp.path(), "d.docx", &["Delta is brand new."]); // new
+
+    let out = run_cli(tmp.path(), &["status"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(section_of(&stdout, "modified"), ["a.docx"], "{stdout}");
+    assert_eq!(section_of(&stdout, "new"), ["d.docx"], "{stdout}");
+    assert_eq!(section_of(&stdout, "deleted"), ["b.docx"], "{stdout}");
+    assert!(
+        stdout.contains("1 unchanged, 1 modified, 1 new, 1 deleted, 0 failed"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn status_does_not_modify_the_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    three(tmp.path());
+    index_dir_cli(tmp.path());
+    // Give status every reason to write: an edit, a delete, a new file, and
+    // a touched file whose content is unchanged.
+    write_docx(tmp.path(), "a.docx", &["Alpha, now edited."]);
+    std::fs::remove_file(tmp.path().join("b.docx")).unwrap();
+    write_docx(tmp.path(), "d.docx", &["Delta is brand new."]);
+    push_mtime_forward(&tmp.path().join("c.docx"));
+
+    let store = tmp.path().join(".docparse");
+    let db = store.join("index.db");
+    let bytes_before = std::fs::read(&db).unwrap();
+    let listing_before = dir_listing(&store);
+
+    assert_eq!(run_cli(tmp.path(), &["status"]).status.code(), Some(0));
+    // And with a changed setting, which `index` would act on.
+    let out = run_cli(tmp.path(), &["status", "--chunk", "400"]);
+    assert_eq!(out.status.code(), Some(0));
+
+    assert_eq!(
+        std::fs::read(&db).unwrap(),
+        bytes_before,
+        "status wrote to index.db"
+    );
+    assert_eq!(
+        dir_listing(&store),
+        listing_before,
+        "status left files behind"
+    );
+}
+
+#[test]
+fn status_json_is_machine_readable() {
+    let tmp = tempfile::tempdir().unwrap();
+    three(tmp.path());
+    index_dir_cli(tmp.path());
+    write_docx(tmp.path(), "a.docx", &["Alpha, now edited."]);
+    std::fs::remove_file(tmp.path().join("b.docx")).unwrap();
+    write_docx(tmp.path(), "d.docx", &["Delta is brand new."]);
+
+    let human = String::from_utf8(run_cli(tmp.path(), &["status"]).stdout).unwrap();
+    let out = run_cli(tmp.path(), &["status", "--json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json output must be one JSON document");
+
+    assert_eq!(v["counts"]["unchanged"], 1);
+    assert_eq!(v["counts"]["modified"], 1);
+    assert_eq!(v["counts"]["new"], 1);
+    assert_eq!(v["counts"]["deleted"], 1);
+    assert_eq!(v["counts"]["failed"], 0);
+    assert_eq!(v["modified"][0], "a.docx");
+    assert_eq!(v["new"][0], "d.docx");
+    assert_eq!(v["deleted"][0], "b.docx");
+    assert_eq!(v["staleness"]["state"], "current");
+    // Same counts as the human form.
+    assert!(
+        human.contains("1 unchanged, 1 modified, 1 new, 1 deleted, 0 failed"),
+        "{human}"
+    );
+}
+
+#[test]
+fn status_on_an_unindexed_directory_says_so_without_creating_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    three(tmp.path());
+
+    let out = run_cli(tmp.path(), &["status"]);
+    assert_ne!(out.status.code(), Some(0));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("docparse index"), "stderr: {stderr}");
+    assert!(
+        !tmp.path().join(".docparse").exists(),
+        "status must not create an index"
+    );
+
+    // Also with --index-dir pointing at a place that does not exist.
+    let elsewhere = tmp.path().join("nowhere");
+    let out = Command::new(binary())
+        .args(["status", "--index-dir"])
+        .arg(&elsewhere)
+        .arg(tmp.path())
+        .output()
+        .unwrap();
+    assert_ne!(out.status.code(), Some(0));
+    assert!(!elsewhere.exists(), "status created --index-dir");
+}
+
+#[test]
+fn status_reports_a_config_change_without_acting_on_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    three(tmp.path());
+    index_dir_cli(tmp.path());
+
+    let out = run_cli(tmp.path(), &["status", "--chunk", "400"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("STALE"), "{stdout}");
+    assert!(stdout.contains("all 3 indexed files"), "{stdout}");
+    assert!(
+        stdout.contains("chunk=800"),
+        "names the old value: {stdout}"
+    );
+    assert!(
+        stdout.contains("chunk=400"),
+        "names the new value: {stdout}"
+    );
+
+    // Not acted on: the recorded settings are still the originals.
+    let after = String::from_utf8(run_cli(tmp.path(), &["status"]).stdout).unwrap();
+    assert!(!after.contains("STALE"), "{after}");
+}
+
+#[test]
+fn status_reports_an_unchanged_failed_file_as_failed_not_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_docx(tmp.path(), "good.docx", &["Fine document text."]);
+    std::fs::write(tmp.path().join("bad.docx"), b"this is not a zip").unwrap();
+    let out = run_cli(tmp.path(), &["index"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+
+    let summary = "1 unchanged, 0 modified, 0 new, 0 deleted, 1 failed";
+
+    // Untouched since indexing: decide_cheap says SkipFailed.
+    let s = String::from_utf8(run_cli(tmp.path(), &["status"]).stdout).unwrap();
+    assert_eq!(section_of(&s, "failed").len(), 1, "{s}");
+    assert!(s.contains("bad.docx"), "{s}");
+    assert!(s.contains(summary), "{s}");
+
+    // Same bytes, newer mtime: NeedsHash, then decide_after_hash says
+    // TouchOnly. Still failed, because the content never parsed.
+    push_mtime_forward(&tmp.path().join("bad.docx"));
+    let s = String::from_utf8(run_cli(tmp.path(), &["status"]).stdout).unwrap();
+    assert_eq!(section_of(&s, "failed").len(), 1, "{s}");
+    assert!(s.contains(summary), "{s}");
+}
+
+#[test]
+fn status_and_index_agree_when_an_earlier_run_did_not_finish() {
+    let tmp = tempfile::tempdir().unwrap();
+    three(tmp.path());
+    index_dir_cli(tmp.path());
+
+    // Simulate a killed run: rows exist but the settings were never recorded.
+    {
+        let conn =
+            rusqlite::Connection::open(tmp.path().join(".docparse").join("index.db")).unwrap();
+        conn.execute("DELETE FROM meta WHERE key LIKE 'config_%'", [])
+            .unwrap();
+    }
+
+    let out = run_cli(tmp.path(), &["status"]);
+    assert_eq!(out.status.code(), Some(0));
+    let s = String::from_utf8(out.stdout).unwrap();
+    assert!(s.contains("STALE"), "{s}");
+    assert!(
+        s.contains("earlier run did not finish; its settings were never recorded"),
+        "{s}"
+    );
+    assert!(s.contains("all 3 indexed files"), "{s}");
+
+    let j: serde_json::Value =
+        serde_json::from_slice(&run_cli(tmp.path(), &["status", "--json"]).stdout).unwrap();
+    assert_eq!(j["staleness"]["state"], "first_run_unfinished");
+
+    // And `index` does what status predicted: re-parse all 3.
+    let out = run_cli(tmp.path(), &["index", "--jobs", "1"]);
+    let idx = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        idx.contains("earlier run did not finish; its settings were never recorded"),
+        "{idx}"
+    );
+    assert!(idx.contains("3 parsed"), "{idx}");
+}
+
+#[test]
+fn status_never_modifies_index_db_or_wal_when_a_wal_exists() {
+    let tmp = tempfile::tempdir().unwrap();
+    three(tmp.path());
+    index_dir_cli(tmp.path());
+    let store = tmp.path().join(".docparse");
+    let db = store.join("index.db");
+
+    // A second connection holding the WAL open keeps `-wal` on disk and puts
+    // real uncheckpointed data in it.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;")
+        .unwrap();
+    conn.execute(
+        "UPDATE meta SET value = value WHERE key = 'schema_version'",
+        [],
+    )
+    .unwrap();
+    let wal = store.join("index.db-wal");
+    assert!(wal.exists(), "test needs a live -wal");
+    let (db_before, wal_before) = (std::fs::read(&db).unwrap(), std::fs::read(&wal).unwrap());
+
+    let out = run_cli(tmp.path(), &["status"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+
+    assert_eq!(std::fs::read(&db).unwrap(), db_before, "index.db changed");
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_before, "-wal changed");
+    // `-shm` is SQLite's derived cache and may be created or updated here.
+    drop(conn);
+}
+
+#[test]
+fn status_reports_copies_of_healthy_and_failed_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_docx(tmp.path(), "good.docx", &["Fine document text."]);
+    std::fs::write(tmp.path().join("bad.docx"), b"this is not a zip").unwrap();
+    run_cli(tmp.path(), &["index"]);
+
+    std::fs::copy(
+        tmp.path().join("good.docx"),
+        tmp.path().join("good_copy.docx"),
+    )
+    .unwrap();
+    std::fs::copy(
+        tmp.path().join("bad.docx"),
+        tmp.path().join("bad_copy.docx"),
+    )
+    .unwrap();
+
+    let s = String::from_utf8(run_cli(tmp.path(), &["status"]).stdout).unwrap();
+    // A copy of healthy content is a new path (LinkExisting -> new).
+    assert_eq!(section_of(&s, "new"), ["good_copy.docx"], "{s}");
+    // A copy of failed content is failed, not new.
+    let failed = section_of(&s, "failed");
+    assert_eq!(failed.len(), 2, "{s}");
+    assert!(failed.iter().any(|l| l.starts_with("bad_copy.docx")), "{s}");
+}
