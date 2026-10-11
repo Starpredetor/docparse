@@ -155,11 +155,32 @@ enum Commands {
     Export(ExportArgs),
 }
 
+/// The settings that affect extraction output. Flattened into the bare form
+/// AND into `index`/`status`, because spec Section 6 lists them under `index`
+/// and Task 5 fingerprints them.
+#[derive(Debug, Clone, clap::Args)]
+struct ExtractArgs {
+    #[arg(long, default_value_t = 800)]
+    chunk: usize,
+    #[arg(long, default_value_t = 1200)]
+    max_chunk: usize,
+    #[arg(long, default_value_t = 1)]
+    overlap: usize,
+    #[arg(long)]
+    cross_page: bool,
+    #[arg(long)]
+    ocr: bool,
+    #[arg(long, default_value_t = 150)]
+    ocr_dpi: u32,
+}
+
 #[derive(Debug, clap::Args)]
 struct IndexArgs {
     /// Directory to index. Defaults to the current directory.
     #[arg(default_value = ".")]
     path: PathBuf,
+    #[command(flatten)]
+    extract: ExtractArgs,
     /// Put or find `.docparse` somewhere other than inside PATH.
     #[arg(long)]
     index_dir: Option<PathBuf>,
@@ -177,6 +198,8 @@ struct IndexArgs {
 struct StatusArgs {
     #[arg(default_value = ".")]
     path: PathBuf,
+    #[command(flatten)]
+    extract: ExtractArgs,
     #[arg(long)]
     index_dir: Option<PathBuf>,
     /// Machine-readable output.
@@ -259,7 +282,7 @@ Expected: all 88 existing tests plus the 2 new ones pass, clippy and fmt clean. 
 In `docparse/docparse/Cargo.toml`:
 
 ```toml
-rusqlite = { version = "0.32", features = ["bundled", "fts5"] }
+rusqlite = { version = "0.32", features = ["bundled"] }   # bundled SQLite already includes FTS5; there is no separate `fts5` feature in 0.32
 blake3 = "1"
 ```
 
@@ -647,7 +670,7 @@ cd docparse && cargo test -p docparse --test index_schema_test
 
 Expected: all 7 PASS.
 
-If `a_corrupt_index_is_refused_rather_than_silently_rebuilt` fails because SQLite accepted the garbage file, note that SQLite defers header validation until first read — the `PRAGMA journal_mode` batch is what forces it. Keep that call before the DDL for exactly this reason.
+If `a_corrupt_index_is_refused_rather_than_silently_rebuilt` fails because SQLite accepted the garbage file, the cause is that nothing has read the file yet — SQLite defers header validation until first access. Either the PRAGMA batch or the DDL will trigger it, so the ordering between those two is not load-bearing for this test.
 
 - [ ] **Step 8: Confirm the no-network invariant still holds**
 
