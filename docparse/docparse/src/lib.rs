@@ -4,7 +4,9 @@
 //! `docs/superpowers/specs/2026-10-04-docparse-design.md`.
 
 pub mod chunk;
+pub mod dispatch;
 pub mod error;
+pub mod index;
 pub mod model;
 pub mod normalize;
 pub mod source;
@@ -22,6 +24,7 @@ pub mod image;
 pub mod ocr;
 
 pub use chunk::{split_sentences, ChunkConfig, Chunker};
+pub use dispatch::{is_supported, open_source, SUPPORTED};
 pub use error::{Error, Result};
 pub use model::{Block, BlockKind, BlockRef, Chunk, Page, PageOrigin, Rect};
 pub use source::Source;

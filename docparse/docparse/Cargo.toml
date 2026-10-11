@@ -8,6 +8,10 @@ rust-version.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+blake3 = "1"
+walkdir = "2"
+rayon = "1"
 quick-xml = { version = "0.37", optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 # The compiled pdfium_NNNN feature must match or predate the deployed
@@ -31,6 +35,7 @@ docx = ["dep:quick-xml", "dep:zip"]
 serde_json = { workspace = true }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tempfile = "3"
+rusqlite = { version = "0.32", features = ["bundled"] }
 peak_alloc = "0.2"
 criterion = { version = "0.5", features = ["html_reports"] }
 

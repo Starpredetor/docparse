@@ -36,6 +36,11 @@ pub enum Error {
 
     #[error("{path}: this input needs OCR (an image, or a PDF page with no text and --ocr given), but OCR support is not compiled in; rebuild with the `ocr` feature")]
     OcrUnavailable { path: PathBuf },
+
+    /// The index itself is unusable: wrong schema version, wrong root,
+    /// corrupt file, or an unwritable location. Never a silent rebuild.
+    #[error("index unusable: {detail}")]
+    Index { detail: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
