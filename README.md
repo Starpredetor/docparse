@@ -14,6 +14,26 @@ or guessed by OCR.
   See [BENCHMARKS.md](BENCHMARKS.md)
   for what was and was not measured, and the DOCX and OCR caveats below.
 
+> ### Known defect: use `--jobs 1` for PDF input
+>
+> PDF extraction is **not safe under concurrency**. The process-wide PDFium
+> binding is guarded only while it is created, not while it is used, so
+> multiple worker threads call into a library that has global state and is not
+> thread-safe. `pdfium-render`'s `thread_safe` feature is enabled and is not
+> sufficient: it guards individual calls, not a document's lifecycle.
+>
+> It surfaces as *bogus per-file errors* -- `could not open as PDF:
+> FormatError`, or `page N: PdfiumLibraryInternalError` -- on files that parse
+> perfectly well on their own. So it looks like a corpus full of corrupt
+> documents rather than a bug. Measured on one 11,623-file corpus: **0 failures
+> at `--jobs 1`, 10,775 at `--jobs 4`.** It is probabilistic, and small runs
+> often get away with it (a 200-file subset showed no failures at either job
+> count), so a clean small test proves nothing here.
+>
+> Because the default is `min(cores, 4)`, **the default is the broken
+> configuration.** Pass `--jobs 1` for any PDF input until this is fixed.
+> DOCX and image inputs are unaffected.
+
 It is positioned as an **extraction layer to sit in front of a retrieval
 tool**, not as a general-purpose document parser. ML-driven parsers that do
 layout analysis, table recovery and reading-order correction exist and are far
@@ -29,7 +49,7 @@ cargo build --release --workspace
 # PDFium must sit beside the binary (see Deployment). On Windows:
 #   copy pdfium.dll target\release\
 
-./target/release/docparse ../corpus/ -o out.jsonl --jobs 4
+./target/release/docparse ../corpus/ -o out.jsonl --jobs 1   # see the defect note above
 ```
 
 Directories are walked recursively; `.docx`, `.pdf`, `.png`, `.jpg`, `.jpeg`,
@@ -61,7 +81,7 @@ themselves:
 | `--overlap` | 1 | Sentences repeated between consecutive chunks |
 | `--cross-page` | off | Allow a chunk to span pages (off keeps page attribution exact) |
 | `--emit` | `chunks` | `chunks` or `blocks` |
-| `-j, --jobs` | min(cores, 4) | Worker threads |
+| `-j, --jobs` | min(cores, 4) | Worker threads. **Use 1 for PDF input** -- see the defect note above |
 | `--ocr` | off | OCR PDF pages with no extractable text (needs the `ocr` feature) |
 | `--ocr-dpi` | 150 | Render DPI for OCR |
 
@@ -74,6 +94,94 @@ records in the output.
 order. With more jobs, each file's lines stay contiguous and in order, but
 files appear in completion order. Restoring input order would mean holding the
 whole corpus's output in memory, so it is deliberately not done.
+
+## Indexing
+
+Instead of re-parsing everything on every run, `docparse` can keep an
+incremental index beside your documents and re-parse only what changed -- the
+way a version-control tool tracks a working tree.
+
+```bash
+docparse index .                 # parse what changed, store it in .docparse/
+docparse status .                # what the next index would do, parsing nothing
+docparse export . -o all.jsonl   # replay the whole index back out as JSONL
+```
+
+The path defaults to `.`, so a bare `docparse index` indexes the current
+directory. `--index-dir DIR` puts (or finds) the index somewhere other than
+inside the indexed root, which is what you want for a read-only corpus.
+
+### What lives in `.docparse/`
+
+| File | Purpose |
+|---|---|
+| `index.db` | SQLite database: file records, chunks, and an FTS5 full-text index |
+| `index.db-wal`, `index.db-shm` | SQLite write-ahead log and its shared-memory sidecar |
+| `.gitignore` | Written automatically, so the index never lands in your commits |
+
+An index belongs to **one root**. It records the root it was built for and
+refuses to open against a different one rather than silently mixing corpora.
+
+### How change detection works
+
+Three tiers, cheapest first, so a no-op re-run does almost no I/O:
+
+1. **Size and mtime** match the recorded values, so the file is unchanged and
+   is never read.
+2. Otherwise the file is **content-hashed** (BLAKE3, streamed in 64 KiB
+   blocks; a large file is never read whole into memory).
+3. The hash decides: new content is parsed, while content already in the index
+   is **linked** to the new path without re-parsing.
+
+So renames, copies and duplicates cost a hash, not a parse. On the
+11,623-file corpus measured below, 3,832 paths held content already present
+and were linked rather than parsed.
+
+Files that disappear are **pruned** from the index. Files that fail to parse
+are recorded with their error and skipped on later runs, until
+`--retry-failed` asks for another attempt. `--reindex` ignores the cache and
+rebuilds from scratch.
+
+Changing a setting that affects output -- chunk size, overlap, `--cross-page`,
+OCR -- changes the stored configuration fingerprint, and the next `index`
+re-parses everything, because chunks produced under different settings must
+not be mixed. The same applies when the extraction logic itself is versioned
+up.
+
+### Atomicity
+
+Each file is committed in its own transaction, so an interrupted run leaves no
+half-written file in the index, and re-running resumes where it stopped. This
+matters on a long run: a crash 8,000 files in costs only the file in flight.
+
+If a run is killed before it records its configuration, the next `index`
+re-parses everything -- and `status` reports that as `STALE`, with the same
+reason `index` will print, rather than claiming the corpus is up to date.
+
+### `status` and `export`
+
+`status` opens the index read-only and writes nothing to `index.db` or its
+WAL. (It may create or update the `-shm` sidecar, which is a derived cache.
+Opening fully immutable would make it blind to data still sitting in an
+uncheckpointed WAL, which is the worse failure.) `--json` gives
+machine-readable output.
+
+`export` reproduces the streaming path's JSONL **byte for byte** for the same
+inputs and settings. That round trip is how the storage layer is shown to lose
+nothing. Export order is the walk's per-directory order, not a flat sort of
+the relative paths: a directory's contents sort where the directory's own name
+sorts. The comparison is defined against `--jobs 1`, since parallel streaming
+emits files in completion order.
+
+### Not yet implemented
+
+- **No single-writer lock.** Nothing stops two `index` runs on the same
+  directory from racing. Run one at a time.
+- **Zero-chunk successes are invisible.** A file that parses without error and
+  yields no text -- a scanned PDF with no text layer, with OCR off -- counts as
+  a success and is never mentioned. On the corpus below that was 7,624 of
+  7,791 files, so an almost entirely empty index was reported as a clean run.
+  Check the chunk count, not just the exit code.
 
 ## Output schema
 
@@ -147,6 +255,25 @@ budget. BENCHMARKS.md also lists what has not been measured; please read it
 before drawing conclusions from the speed figures. No comparison against any
 other tool has been run.
 
+**Real corpus**, 11,623 PDF and DOCX files in one flat directory (~6 GB, HDD,
+release build, `--jobs 1`, OCR off):
+
+| | |
+|---|---|
+| Paths indexed | 11,623 |
+| Unique files behind them | 7,791 (3,832 duplicate paths linked, not re-parsed) |
+| Chunks | 21,363 |
+| Text extracted | 18.6 MB |
+| `index.db` on disk | 30.3 MB |
+| Files yielding zero chunks | **7,624 of 7,791** |
+| Failures at `--jobs 1` | 0 |
+| Failures at `--jobs 4` | 10,775 (the concurrency defect above) |
+
+That corpus is almost entirely scanned images with no text layer, so 167 files
+produced all 21,363 chunks. It is a useful reminder that a clean exit code
+says nothing about whether anything was extracted. Wall-clock time for this
+run was not recorded, so no rate is quoted for it.
+
 ## What it deliberately does not do
 
 These are decisions, not gaps waiting to be filled.
@@ -183,6 +310,11 @@ These are decisions, not gaps waiting to be filled.
   streams page by page. Large-DOCX memory has not been measured.
 - **`--jobs N` buffers one document's JSONL per worker**, so a single huge
   document costs that buffer times N.
+- **PDF extraction is unsafe under concurrency**, and the default job count
+  triggers it. See the defect note at the top. This also means any
+  previously published multi-job PDF figure was luck, not a guarantee.
+- **A file that yields no text is reported as a success**, so a corpus of
+  scans with OCR off indexes to almost nothing without complaint.
 - **OCR breaks the memory budget** (see below).
 
 ## Deployment requirements
@@ -252,3 +384,5 @@ not needed to build or run `docparse`.
   - `docparse/docparse-cli/` the `docparse` binary
 - `docs/superpowers/` design spec and implementation plan
 - `corpus/` local PDFs used for measurements (gitignored)
+- `.docparse/` created inside whatever directory you index (gitignored by the
+  tool itself; it is not part of this repo's own layout)
