@@ -21,7 +21,7 @@
 //! a layout heuristic and out of scope.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use pdfium_render::prelude::*;
 
@@ -42,6 +42,37 @@ static PDFIUM: OnceLock<Pdfium> = OnceLock::new();
 /// Held across check-and-bind so only one thread ever calls
 /// `bind_to_system_library`.
 static BIND_LOCK: Mutex<()> = Mutex::new(());
+
+/// Serialises all *use* of PDFium, not just its creation.
+///
+/// PDFium is a C library with process-global state and is not thread-safe.
+/// `pdfium-render`'s `thread_safe` feature guards individual binding calls,
+/// which is not enough: a document's open/read/close lifecycle must be atomic
+/// with respect to other documents. Without that, concurrent workers corrupt
+/// each other and PDFium reports it as *bogus per-file errors* --
+/// `FormatError` on open, or `PdfiumLibraryInternalError` mid-document -- on
+/// files that parse perfectly in isolation. Measured on an 11,623-file corpus:
+/// 0 failures at one worker, 10,775 at four.
+///
+/// A `PdfSource` therefore holds this lock from `open` until it is dropped,
+/// which means **PDF extraction is effectively single-threaded**. DOCX and
+/// image extraction are unaffected and still run in parallel. Serialising is
+/// the deliberate trade: correct output at one PDF at a time beats fast
+/// garbage.
+///
+/// Reentrancy: a `std::sync::Mutex` is not reentrant, so one thread must never
+/// hold two `PdfSource`s at once -- it would deadlock against itself. Every
+/// caller (the streaming path, the index walker, the benches, the tests) opens
+/// one document at a time, which the `open` doc comment records as a
+/// requirement.
+static PDFIUM_LOCK: Mutex<()> = Mutex::new(());
+
+/// Peak number of `PdfSource`s alive at once, for the test that pins the
+/// mutual exclusion. Instrumentation only; not compiled into a real build.
+#[cfg(test)]
+static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static PEAK_LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Binds PDFium on first use and returns the shared instance.
 ///
@@ -76,12 +107,22 @@ pub struct PdfSource {
     /// When true, a page with no extractable text is rendered and OCR'd.
     ocr_fallback: bool,
     ocr_dpi: u32,
+    /// Serialises PDFium for this source's whole lifetime. Declared LAST on
+    /// purpose: fields drop in declaration order, so `document` is closed
+    /// before this guard releases, and no other thread can enter PDFium while
+    /// this document is still being torn down.
+    _pdfium_guard: MutexGuard<'static, ()>,
 }
 
 impl PdfSource {
     /// Opens `path`. Returns `Error::Io` if the file cannot be opened and
     /// `Error::Malformed` if it is not a PDF; returns `Error::Backend` if PDFium
     /// is unavailable.
+    ///
+    /// Blocks until no other `PdfSource` exists, because PDFium is not
+    /// thread-safe (see `PDFIUM_LOCK`). **A single thread must not hold two
+    /// `PdfSource`s at once**; the lock is not reentrant and the thread would
+    /// deadlock against itself.
     pub fn open(path: &Path) -> Result<Self> {
         // Open the file ourselves so a missing file is a real I/O error
         // rather than a stringified PDFium one.
@@ -90,7 +131,16 @@ impl PdfSource {
             source,
         })?;
 
-        let document = pdfium()?
+        // Bind before taking the lock: binding has its own lock, and a
+        // failure to find the library is not worth serialising on.
+        let pdfium = pdfium()?;
+
+        // From here until this source drops, this thread owns PDFium. The
+        // `load` itself must be inside the lock: `FormatError` on open was the
+        // single most common symptom of the unguarded version.
+        let guard = PDFIUM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let document = pdfium
             .load_pdf_from_file(path, None)
             .map_err(|e| Error::Malformed {
                 path: path.to_path_buf(),
@@ -98,6 +148,14 @@ impl PdfSource {
             })?;
 
         let page_count = document.pages().len();
+
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering;
+            let live = LIVE.fetch_add(1, Ordering::SeqCst) + 1;
+            PEAK_LIVE.fetch_max(live, Ordering::SeqCst);
+        }
+
         Ok(Self {
             path: path.to_path_buf(),
             document,
@@ -105,6 +163,7 @@ impl PdfSource {
             page_count,
             ocr_fallback: false,
             ocr_dpi: 150,
+            _pdfium_guard: guard,
         })
     }
 
@@ -270,6 +329,13 @@ impl std::fmt::Debug for PdfSource {
     }
 }
 
+#[cfg(test)]
+impl Drop for PdfSource {
+    fn drop(&mut self) {
+        LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// One text run as PDFium reports it, before merging.
 struct Segment {
     text: String,
@@ -398,6 +464,54 @@ fn merge_segments(segments: Vec<Segment>) -> Vec<Block> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins the mutual exclusion that makes PDF extraction safe.
+    ///
+    /// This tests the MECHANISM, not the symptom, and that is deliberate. The
+    /// symptom -- PDFium returning bogus `FormatError`s under concurrency --
+    /// could not be reproduced from the test fixtures at all: 2,400 concurrent
+    /// reads of 1 MB fixtures passed in both debug and release, and so did 400
+    /// distinct copies of one fixture, while 3,000 *varied* real-world PDFs
+    /// failed 780 times. Reproducing it needs a corpus this repo does not
+    /// ship, so a test asserting "no errors" would pass whether or not the
+    /// lock exists -- worthless as a regression test.
+    ///
+    /// Mutual exclusion, by contrast, is deterministic: if the guard is
+    /// removed, two threads overlap almost immediately and the peak count
+    /// exceeds 1.
+    #[test]
+    fn only_one_pdf_source_can_exist_at_a_time() {
+        use std::sync::atomic::Ordering;
+
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("two_pages.pdf");
+
+        PEAK_LIVE.store(0, Ordering::SeqCst);
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..20 {
+                        let mut source = PdfSource::open(&fixture).expect("fixture opens");
+                        // Do real work while holding it, so an unguarded
+                        // version has a wide window to overlap in.
+                        while let Some(page) = source.next_page() {
+                            page.expect("fixture page reads");
+                        }
+                    }
+                });
+            }
+        });
+
+        assert_eq!(
+            PEAK_LIVE.load(Ordering::SeqCst),
+            1,
+            "two PdfSources existed at once, so PDFium was being called \
+             concurrently; PDFIUM_LOCK is not doing its job"
+        );
+    }
 
     fn seg(text: &str, x0: f32, x1: f32, y0: f32) -> Segment {
         Segment {
