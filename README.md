@@ -14,25 +14,26 @@ or guessed by OCR.
   See [BENCHMARKS.md](BENCHMARKS.md)
   for what was and was not measured, and the DOCX and OCR caveats below.
 
-> ### Known defect: use `--jobs 1` for PDF input
+> ### PDF extraction is serialised
 >
-> PDF extraction is **not safe under concurrency**. The process-wide PDFium
-> binding is guarded only while it is created, not while it is used, so
-> multiple worker threads call into a library that has global state and is not
-> thread-safe. `pdfium-render`'s `thread_safe` feature is enabled and is not
-> sufficient: it guards individual calls, not a document's lifecycle.
+> PDFium is a C library with process-global state and is not thread-safe, so
+> `docparse` holds a process-wide lock for as long as a PDF document is open.
+> **PDF extraction therefore runs one document at a time, whatever `--jobs`
+> says.** DOCX and image extraction are unaffected and still run in parallel.
 >
-> It surfaces as *bogus per-file errors* -- `could not open as PDF:
-> FormatError`, or `page N: PdfiumLibraryInternalError` -- on files that parse
-> perfectly well on their own. So it looks like a corpus full of corrupt
-> documents rather than a bug. Measured on one 11,623-file corpus: **0 failures
-> at `--jobs 1`, 10,775 at `--jobs 4`.** It is probabilistic, and small runs
-> often get away with it (a 200-file subset showed no failures at either job
-> count), so a clean small test proves nothing here.
+> This is a deliberate trade made after the unserialised version was measured
+> producing *bogus* per-file errors under concurrency -- `could not open as
+> PDF: FormatError`, `page N: PdfiumLibraryInternalError` -- on files that
+> parse perfectly in isolation. On an 11,623-file corpus it failed 10,775 files
+> at `--jobs 4` and 0 at `--jobs 1`. `pdfium-render`'s `thread_safe` feature is
+> enabled and was not sufficient: it guards individual calls, not a document's
+> whole lifecycle.
 >
-> Because the default is `min(cores, 4)`, **the default is the broken
-> configuration.** Pass `--jobs 1` for any PDF input until this is fixed.
-> DOCX and image inputs are unaffected.
+> After the fix that same corpus indexes identically at `--jobs 1` and
+> `--jobs 4` (7,791 parsed, 3,832 linked, 0 failed). Throughput on the test
+> machine's HDD was I/O-bound and too variable to rank job counts: roughly
+> 35-50 s per 3,000 files at any setting, with occasional outliers past 170 s
+> at every job count including 1.
 
 It is positioned as an **extraction layer to sit in front of a retrieval
 tool**, not as a general-purpose document parser. ML-driven parsers that do
@@ -49,7 +50,7 @@ cargo build --release --workspace
 # PDFium must sit beside the binary (see Deployment). On Windows:
 #   copy pdfium.dll target\release\
 
-./target/release/docparse ../corpus/ -o out.jsonl --jobs 1   # see the defect note above
+./target/release/docparse ../corpus/ -o out.jsonl --jobs 4
 ```
 
 Directories are walked recursively; `.docx`, `.pdf`, `.png`, `.jpg`, `.jpeg`,
@@ -81,7 +82,7 @@ themselves:
 | `--overlap` | 1 | Sentences repeated between consecutive chunks |
 | `--cross-page` | off | Allow a chunk to span pages (off keeps page attribution exact) |
 | `--emit` | `chunks` | `chunks` or `blocks` |
-| `-j, --jobs` | min(cores, 4) | Worker threads. **Use 1 for PDF input** -- see the defect note above |
+| `-j, --jobs` | min(cores, 4) | Worker threads. PDF work is serialised regardless (see above); DOCX and images scale |
 | `--ocr` | off | OCR PDF pages with no extractable text (needs the `ocr` feature) |
 | `--ocr-dpi` | 150 | Render DPI for OCR |
 
@@ -267,7 +268,7 @@ release build, `--jobs 1`, OCR off):
 | `index.db` on disk | 30.3 MB |
 | Files yielding zero chunks | **7,624 of 7,791** |
 | Failures at `--jobs 1` | 0 |
-| Failures at `--jobs 4` | 10,775 (the concurrency defect above) |
+| Failures at `--jobs 4` | 0 (was 10,775 before PDFium was serialised) |
 
 That corpus is almost entirely scanned images with no text layer, so 167 files
 produced all 21,363 chunks. It is a useful reminder that a clean exit code
@@ -310,9 +311,11 @@ These are decisions, not gaps waiting to be filled.
   streams page by page. Large-DOCX memory has not been measured.
 - **`--jobs N` buffers one document's JSONL per worker**, so a single huge
   document costs that buffer times N.
-- **PDF extraction is unsafe under concurrency**, and the default job count
-  triggers it. See the defect note at the top. This also means any
-  previously published multi-job PDF figure was luck, not a guarantee.
+- **PDF extraction does not scale with `--jobs`.** It is serialised behind a
+  process-wide lock because PDFium is not thread-safe (see the note at the
+  top). Any PDF speed figure quoted for a job count above 1 in an earlier
+  revision of this file was measuring unserialised, and therefore unsound,
+  behaviour.
 - **A file that yields no text is reported as a success**, so a corpus of
   scans with OCR off indexes to almost nothing without complaint.
 - **OCR breaks the memory budget** (see below).
